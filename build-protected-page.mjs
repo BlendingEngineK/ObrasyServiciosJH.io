@@ -80,7 +80,7 @@ if (!password || password.length < 10) {
   throw new Error("Usa una clave de al menos 10 caracteres.");
 }
 
-const html = readFileSync(sourcePath, "utf8");
+const html = addLateBoot(readFileSync(sourcePath, "utf8"));
 const salt = randomBytes(16);
 const iv = randomBytes(12);
 const key = pbkdf2Sync(password, salt, iterations, 32, "sha256");
@@ -330,4 +330,90 @@ function escapeHtml(value) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function addLateBoot(sourceHtml) {
+  const marker =
+    /(\s{4}if \(window\.Babel && typeof window\.Babel\.transformScriptTags === 'function'\) \{\r?\n\s{6}window\.Babel\.transformScriptTags\(\);\r?\n\s{4}\})/;
+  const lateBoot = `
+
+    // The protected Pages wrapper loads this bundled page after the original
+    // DOMContentLoaded event. Start the reveal system again so React-rendered
+    // hero text and imagery do not stay hidden at opacity: 0.
+    (function protectedPreviewLateBoot() {
+      let observer = null;
+      const observed = new WeakSet();
+
+      function ensureObserver() {
+        if (observer || typeof IntersectionObserver === 'undefined') return observer;
+        observer = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add('is-in');
+              observer.unobserve(entry.target);
+            }
+          });
+        }, { threshold: 0.14, rootMargin: '0px 0px -6% 0px' });
+        return observer;
+      }
+
+      function revealVisibleNow(element) {
+        const rect = element.getBoundingClientRect();
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+        if (rect.top < viewportHeight * 0.94 && rect.bottom > 0) {
+          element.classList.add('is-in');
+        }
+      }
+
+      function scanReveals() {
+        const io = ensureObserver();
+        document.querySelectorAll('.reveal:not(.is-in), .word-reveal:not(.is-in)').forEach((element) => {
+          if (io && !observed.has(element)) {
+            observed.add(element);
+            io.observe(element);
+          }
+          revealVisibleNow(element);
+        });
+      }
+
+      function updateProcessTrack() {
+        const element = document.querySelector('.process-track');
+        if (!element) return;
+        const rect = element.getBoundingClientRect();
+        const viewportHeight = window.innerHeight || 0;
+        const total = rect.height + viewportHeight * 0.5;
+        const passed = Math.min(total, Math.max(0, (viewportHeight * 0.8) - rect.top));
+        const percent = Math.max(0, Math.min(100, (passed / total) * 100));
+        element.style.setProperty('--progress', percent + '%');
+      }
+
+      function tick() {
+        scanReveals();
+        updateProcessTrack();
+      }
+
+      function start() {
+        if (!document.body) return;
+        new MutationObserver(tick).observe(document.body, { childList: true, subtree: true });
+        window.addEventListener('scroll', tick, { passive: true });
+        window.addEventListener('resize', tick);
+        tick();
+
+        let attempts = 0;
+        const timer = setInterval(() => {
+          tick();
+          attempts += 1;
+          if (attempts > 80) clearInterval(timer);
+        }, 100);
+      }
+
+      if (document.body) start();
+      else setTimeout(start, 0);
+    })();`;
+
+  const nextHtml = sourceHtml.replace(marker, `$1${lateBoot}`);
+  if (nextHtml === sourceHtml) {
+    throw new Error("No pude insertar el arranque tardio de animaciones en el bundle.");
+  }
+  return nextHtml;
 }
