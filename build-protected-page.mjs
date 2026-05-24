@@ -62,9 +62,9 @@ async function promptHidden(question) {
   });
 }
 
+const landingDir = join(scriptDir, "..", "Landing Page para_ Servicios y Obras Jorge Huerta");
 const sourcePath = resolve(
-  argValue("--source") ??
-    join(scriptDir, "..", "Landing Page para_ Servicios y Obras Jorge Huerta", "Landing JH - export.html"),
+  argValue("--source") ?? join(landingDir, "Landing JH v3.html"),
 );
 const outPath = resolve(argValue("--out") ?? join(scriptDir, "index.html"));
 const title = argValue("--title") ?? "Vista privada JH";
@@ -80,7 +80,7 @@ if (!password || password.length < 10) {
   throw new Error("Usa una clave de al menos 10 caracteres.");
 }
 
-const html = addLateBoot(readFileSync(sourcePath, "utf8"));
+const html = inlineJsxScripts(readFileSync(sourcePath, "utf8"), dirname(sourcePath));
 const salt = randomBytes(16);
 const iv = randomBytes(12);
 const key = pbkdf2Sync(password, salt, iterations, 32, "sha256");
@@ -237,6 +237,23 @@ const protectedHtml = `<!doctype html>
       .row { grid-template-columns: 1fr; }
       button { width: 100%; }
     }
+
+    body.unlocked {
+      display: block;
+      padding: 0;
+      background: #0a1330;
+    }
+
+    body.unlocked main { display: none; }
+
+    iframe#preview-frame {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #0a1330;
+    }
   </style>
 </head>
 <body>
@@ -304,10 +321,25 @@ const protectedHtml = `<!doctype html>
       button.disabled = true;
 
       try {
-        const html = await decryptHtml(passwordInput.value);
-        document.open();
-        document.write(html);
-        document.close();
+        let html = await decryptHtml(passwordInput.value);
+        // Inject a <base href> so relative URLs (assets/avatar.png, etc.)
+        // resolve against the page that loaded the wrapper rather than the
+        // blob: URL the iframe will be served from. window.location works for
+        // both github.io and local file:// previews.
+        const baseHref = new URL("./", window.location.href).href;
+        const baseTag = '<base href="' + baseHref + '">';
+        html = html.replace(/<head(\s[^>]*)?>/i, (match) => match + baseTag);
+        // Blob URL (not srcdoc) so the iframe inherits the parent origin
+        // and so the HTML fits without srcdoc size limits on mobile Safari.
+        const blobUrl = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+        const frame = document.createElement("iframe");
+        frame.id = "preview-frame";
+        frame.setAttribute("title", "Vista privada JH");
+        frame.setAttribute("allow", "clipboard-write; fullscreen");
+        frame.setAttribute("referrerpolicy", "no-referrer");
+        frame.src = blobUrl;
+        document.body.classList.add("unlocked");
+        document.body.appendChild(frame);
       } catch (error) {
         status.className = "error";
         status.textContent = "Clave incorrecta o navegador incompatible.";
@@ -332,88 +364,28 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-function addLateBoot(sourceHtml) {
-  const marker =
-    /(\s{4}if \(window\.Babel && typeof window\.Babel\.transformScriptTags === 'function'\) \{\r?\n\s{6}window\.Babel\.transformScriptTags\(\);\r?\n\s{4}\})/;
-  const lateBoot = `
+function inlineJsxScripts(sourceHtml, baseDir) {
+  // Replace <script type="text/babel" src="..."></script> with an inline
+  // version carrying the file contents. Lets us ship one self-contained HTML
+  // to the encrypted bundle without leaving JSX files on disk for the iframe
+  // to fetch (those wouldn't be cached inside the cipher anyway).
+  const inlinedScripts = new Set();
+  const pattern = /<script\s+type=["']text\/babel["']\s+src=["']([^"']+)["']\s*>\s*<\/script>/gi;
+  const result = sourceHtml.replace(pattern, (match, srcAttr) => {
+    const filePath = resolve(baseDir, srcAttr);
+    if (!existsSync(filePath)) {
+      throw new Error(`No encuentro el JSX referenciado: ${srcAttr} (resuelto a ${filePath})`);
+    }
+    const code = readFileSync(filePath, "utf8")
+      .replace(/<\/script>/gi, "<\\/script>");
+    inlinedScripts.add(srcAttr);
+    return `<script type="text/babel" data-inlined-from="${escapeHtml(srcAttr)}">\n${code}\n</script>`;
+  });
 
-    // The protected Pages wrapper loads this bundled page after the original
-    // DOMContentLoaded event. Start the reveal system again so React-rendered
-    // hero text and imagery do not stay hidden at opacity: 0.
-    (function protectedPreviewLateBoot() {
-      let observer = null;
-      const observed = new WeakSet();
-
-      function ensureObserver() {
-        if (observer || typeof IntersectionObserver === 'undefined') return observer;
-        observer = new IntersectionObserver((entries) => {
-          entries.forEach((entry) => {
-            if (entry.isIntersecting) {
-              entry.target.classList.add('is-in');
-              observer.unobserve(entry.target);
-            }
-          });
-        }, { threshold: 0.14, rootMargin: '0px 0px -6% 0px' });
-        return observer;
-      }
-
-      function revealVisibleNow(element) {
-        const rect = element.getBoundingClientRect();
-        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-        if (rect.top < viewportHeight * 0.94 && rect.bottom > 0) {
-          element.classList.add('is-in');
-        }
-      }
-
-      function scanReveals() {
-        const io = ensureObserver();
-        document.querySelectorAll('.reveal:not(.is-in), .word-reveal:not(.is-in)').forEach((element) => {
-          if (io && !observed.has(element)) {
-            observed.add(element);
-            io.observe(element);
-          }
-          revealVisibleNow(element);
-        });
-      }
-
-      function updateProcessTrack() {
-        const element = document.querySelector('.process-track');
-        if (!element) return;
-        const rect = element.getBoundingClientRect();
-        const viewportHeight = window.innerHeight || 0;
-        const total = rect.height + viewportHeight * 0.5;
-        const passed = Math.min(total, Math.max(0, (viewportHeight * 0.8) - rect.top));
-        const percent = Math.max(0, Math.min(100, (passed / total) * 100));
-        element.style.setProperty('--progress', percent + '%');
-      }
-
-      function tick() {
-        scanReveals();
-        updateProcessTrack();
-      }
-
-      function start() {
-        if (!document.body) return;
-        new MutationObserver(tick).observe(document.body, { childList: true, subtree: true });
-        window.addEventListener('scroll', tick, { passive: true });
-        window.addEventListener('resize', tick);
-        tick();
-
-        let attempts = 0;
-        const timer = setInterval(() => {
-          tick();
-          attempts += 1;
-          if (attempts > 80) clearInterval(timer);
-        }, 100);
-      }
-
-      if (document.body) start();
-      else setTimeout(start, 0);
-    })();`;
-
-  const nextHtml = sourceHtml.replace(marker, `$1${lateBoot}`);
-  if (nextHtml === sourceHtml) {
-    throw new Error("No pude insertar el arranque tardio de animaciones en el bundle.");
+  if (inlinedScripts.size === 0) {
+    throw new Error("No encontre ningun <script type=\"text/babel\" src=...> para inlinar. Revisa el HTML de origen.");
   }
-  return nextHtml;
+
+  return result;
 }
+
